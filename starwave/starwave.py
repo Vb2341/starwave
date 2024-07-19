@@ -4,6 +4,7 @@ from sklearn.kernel_approximation import Nystroem
 from sklearn.preprocessing import MinMaxScaler
 from scipy import stats
 import os
+import pickle
 import sys
 import functools
 from sklearn.neighbors import KDTree,NearestNeighbors
@@ -17,13 +18,13 @@ from distributions import *
 from plot import *
 from parameters import *
 from getmags import *
-import intNN 
+import intNN
 
 import torch
 import sbi
 from sbi import utils as utils
-from sbi.utils import user_input_checks
-from sbi.inference import SNPE, prepare_for_sbi, simulate_for_sbi
+from sbi.utils import user_input_checks, BoxUniform
+from sbi.inference import SNPE, SNPE_C, prepare_for_sbi, simulate_for_sbi
 from sbi.utils.get_nn_models import posterior_nn
 
 import extinction
@@ -35,16 +36,16 @@ import logging
 
 class StarWave:
     """
-    StarWave: fitting the stellar birth function of resolved stellar populations 
+    StarWave: fitting the stellar birth function of resolved stellar populations
     with approximate Bayesian computation.
     This is the main class that performs the CMD fitting. The class is instantiated with
     an isochrone dataframe and artifical star database, as well as the type of IMF and
     SFH you want to fit/sample from.
-    
+
     """
 
     def __init__(self, isodf, asdf, bands, band_lambdas, imf_type, sfh_type = 'gaussian',
-        sfh_grid = None, Rv = 3.1, params_kwargs = None):
+        sfh_grid = None, sfh_ngaussian=None, Rv = 3.1, params_kwargs = None):
         """
         Initializes the StarWave object
         Parameters
@@ -75,11 +76,16 @@ class StarWave:
         if sfh_type == 'grid' and sfh_grid is None:
             print('please pass an sfh_grid if you want to use grid-based SFH sampling!')
             raise
+        if sfh_type == 'multigaussian':
+            if sfh_ngaussian is None:
+                raise ValueError('Please specify sfh_ngaussian to use multiple gaussian SFH')
+            else:
+                self.sfh_ngaussian = int(sfh_ngaussian)
 
         self.imf_type = imf_type
         self.sfh_type = sfh_type
         self.params_kwargs = params_kwargs
-        self.params = make_params(imf_type, sfh_type, self.params_kwargs)
+        self.params = make_params(imf_type, sfh_type, self.params_kwargs, sfh_ngaussian)
         self.make_prior(self.params) ## INITIALIZE FIXED PARAMS VECTOR
         self.bands = bands
         self.iso_int = intNN.intNN(isodf, self.bands)
@@ -96,11 +102,12 @@ class StarWave:
         self.lim_logmass = np.log(0.1)
         self.sfh_grid = sfh_grid
 
+
         self.Rv = Rv
         self.band_lambdas = band_lambdas
 
         self.debug = False
-        
+
         print('initalized starwave with %s bands, %s IMF, and default priors' % (str(bands), imf_type))
         print('using Rv = %.1f' % (self.Rv))
         self.params.summary()
@@ -121,7 +128,7 @@ class StarWave:
         self.cmd_scaler = MinMaxScaler()
         self.cmd_scaler.fit(observed_cmd);
         scaled_observed_cmd = self.cmd_scaler.transform(observed_cmd)
-        Phi_approx = Nystroem(kernel = 'rbf', n_components=50, gamma = gamma) 
+        Phi_approx = Nystroem(kernel = 'rbf', n_components=50, gamma = gamma)
         Phi_approx.fit(scaled_observed_cmd)
         self.mapping = Phi_approx.transform
         print('scaler initialized and mapping defined!')
@@ -186,8 +193,8 @@ class StarWave:
         output_mags = output_mags[~nans]
 
 
-        return input_mags, output_mags 
-    
+        return input_mags, output_mags
+
     def make_cmd(self, mags):
         """
         convert magnitudes to a cmd
@@ -253,16 +260,36 @@ class StarWave:
 
         if sfh_type == 'gaussian':
             cov = pdict['age_feh_corr'] * pdict['sig_age'] * pdict['sig_feh']
-            covmat = np.array([[pdict['sig_age'], cov], [cov, pdict['sig_feh']]])
+            covmat = np.array([[pdict['sig_age']**2., cov], [cov, pdict['sig_feh']**2.]])
 
 
             if not isPD(covmat):
                 covmat = nearestPD(covmat)
-                print('found nearest SFH covmat...')
+                # print('found nearest SFH covmat...')
 
             means = np.array([pdict['age'], pdict['feh']])
 
             return SW_SFH(stats.multivariate_normal(mean = means, cov = covmat, allow_singular = True))
+
+        elif sfh_type == 'multigaussian':
+            _gaussians = []
+            _probs = []
+
+            for i in range(self.sfh_ngaussian):
+                cov = pdict[f'age_feh_corr_{i}'] * pdict[f'sig_age_{i}'] * pdict[f'sig_feh_{i}']
+                covmat = np.array([[pdict[f'sig_age_{i}']**2., cov], [cov, pdict[f'sig_feh_{i}']**2.]])
+
+                if not isPD(covmat):
+                    covmat = nearestPD(covmat)
+                    # print('found nearest SFH covmat...')
+
+                means = np.array([pdict[f'age_{i}'], pdict[f'feh_{i}']])
+
+                _gaussians.append(stats.multivariate_normal(mean = means, cov = covmat, allow_singular = True))
+                _probs.append(pdict[f'population_frac_{i}'])
+
+            return MultiGaussianSFH(_gaussians, np.array(_probs))
+
 
         elif sfh_type == 'grid':
 
@@ -287,26 +314,26 @@ class StarWave:
         list
             list of prior distributions in torch format
         """
-    
+
         priors = [];
         self.fixed_params = {};
         self.param_mapper = {};
         idx = 0
 
         for ii,(name, param) in enumerate(parameters.dict.items()):
-            
+
             if param.fixed:
                 self.fixed_params[name] = param.value
                 continue
-            
-            
+
+
             lower = param.bounds[0]
             upper = param.bounds[1]
-            
+
             if param.distribution == 'uniform':
                 distribution = torch.distributions.Uniform(lower*torch.ones(1), upper*torch.ones(1))
                 priors.append(distribution)
-                
+
             elif param.distribution == 'norm':
                 try:
                     mean = param.dist_kwargs['mean']
@@ -315,13 +342,13 @@ class StarWave:
                     raise ValueError('please pass valid distribution arguments!')
                 distribution = torch.distributions.Normal(torch.tensor(mean), torch.tensor(sigma))
                 priors.append(distribution)
-                
+
             else:
                 raise ValueError('invalid distribution name')
 
             self.param_mapper[name] = idx
-            idx += 1 # IDX maps the vector of sampled parameters, leaving apart the fixed ones. 
-    
+            idx += 1 # IDX maps the vector of sampled parameters, leaving apart the fixed ones.
+
         return priors
 
     def sample_cmd(self, params, model):
@@ -358,7 +385,7 @@ class StarWave:
                 pdict[name] = self.fixed_params[name]
             else:
                 if is_pdict:
-                    pdict[name] = params[name] # if params are dictionary  
+                    pdict[name] = params[name] # if params are dictionary
                 else:
                     pdict[name] = params[self.param_mapper[name]] # if params are array or tensor
 
@@ -446,6 +473,9 @@ class StarWave:
         else:
             return self.kernel_representation(out_cmd, self.mapping)
 
+    def derp(self):
+        print('yep')
+
     def fit_cmd(self, observed_cmd,
                 n_rounds = 5,
                 n_sims = 100,
@@ -490,7 +520,7 @@ class StarWave:
             print('setting gamma = %i' % gamma)
 
         self.dummy_cmd = np.zeros(observed_cmd.shape)
-        
+
         def simcmd(imf_type):
             return lambda params: self.cmd_sim(params, imf_type = imf_type)
 
@@ -499,13 +529,17 @@ class StarWave:
         #self.params['log_int'].set(value = np.log10(Nobs), bounds = [np.log10(Nobs/2) , np.log10(Nobs*10)])
 
         print_prior_summary(self.params)
-        
+
         prior = user_input_checks.MultipleIndependent(self.make_prior(self.params))
         simulator = simcmd(self.imf_type)
 
         self.simulator,self.prior = prepare_for_sbi(simulator,prior)
+        self.prior = BoxUniform(torch.Tensor([d.low for d in self.prior.dists]),
+                                torch.Tensor([d.high for d in self.prior.dists]))
 
-        inference = SNPE(prior = self.prior)
+        inference = SNPE_C(prior = self.prior, device='cpu', density_estimator='mdn')
+        # inference = SNPE_A(prior = self.prior, device='cpu')
+        # print('USING SNPE')
 
         self.posteriors = [];
         proposal = self.prior
@@ -513,13 +547,25 @@ class StarWave:
         for _ in range(n_rounds):
             print('Starting round %i of neural inference...' % (_+1))
             theta, x = simulate_for_sbi(self.simulator, proposal, num_simulations=n_sims, num_workers = cores)
-            density_estimator = inference.append_simulations(theta, x, proposal=proposal).train()
+            # print(type(theta))
+            # print(type(x))
+            # return theta, x, self
+            print('Appending')
+            if _ == 0:
+                density_estimator = inference.append_simulations(theta, x, proposal=None, data_device='cpu')
+            else:
+                density_estimator = inference.append_simulations(theta, x, proposal=proposal, data_device='cpu')
+            print('Training')
+            density_estimator = density_estimator.train(training_batch_size=64, show_train_summary=True)
+            print('Building')
             posterior = inference.build_posterior(density_estimator)
             self.posteriors.append(posterior)
+            print('Setting')
             proposal = posterior.set_default_x(obs)
 
+        self.inference = inference
         return self.posteriors[-1]
-    
+
 if __name__ == '__main__':
     sw = StarWave()
     sw.params.pretty_print()

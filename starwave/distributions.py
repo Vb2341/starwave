@@ -1,5 +1,5 @@
 import sys
-import os 
+import os
 import numpy as np
 import numpy.linalg as la
 
@@ -12,8 +12,8 @@ from generalrandom import GeneralRandom
 l_logm = np.log(0.05) # lower limit on log stellar mass
 u_logm = np.log(8) # upper limit on log stellar mass
 
-l_age = 8  # lower limit on log stellar age in Gyr
-u_age = 10.1249 # upper limit on log stellar age in Gyr
+l_age = 10  # lower limit on log stellar age in Gyr
+u_age = 13 # upper limit on log stellar age in Gyr
 
 l_feh = -4 # lower limit on [Fe/H]
 u_feh = 1 # upper limit on [Fe/H]
@@ -99,6 +99,30 @@ class SW_SFH:
 		age[~within] = np.nan
 		feh[~within] = np.nan
 		#age = np.log10(age * 1e9) # CONVERT TO LOG AGE FOR ISOCHRONE
+		return np.vstack((age, feh)).T
+
+class MultiGaussianSFH:
+	'''
+	Mixture of Scipy distributions with individual probabilities
+	'''
+	def __init__(self, scipy_dists, probabilities):
+		self.scipy_dists = scipy_dists
+		self.probabilities = probabilities/np.sum(probabilities)
+		self.ndists = len(scipy_dists)
+
+	def sample(self, N):
+		dist_sel = np.random.choice(self.ndists, N, p=self.probabilities)
+		age = np.zeros(dist_sel.shape)
+		feh = np.zeros(dist_sel.shape)
+		for i in range(self.ndists):
+			inds = np.where(dist_sel==i)[0]
+			sfh_i = self.scipy_dists[i].rvs(len(inds))
+			age_i, feh_i = sfh_i.T
+			age[inds] = age_i
+			feh[inds] = feh_i
+		within = (age > l_age) * (age < u_age) * (feh > l_feh) * (feh < u_feh)
+		age[~within] = np.nan
+		feh[~within] = np.nan
 		return np.vstack((age, feh)).T
 
 class GridSFH:
@@ -200,8 +224,8 @@ def set_GR_ln10full(mc,sm,mt,sl):
 	x = np.linspace(l_logm,u_logm,1000)
 	BMtr = x>=np.log(mt)
 	lkm = np.exp(np.log(mt)*(sl+1)) / np.exp(-0.5* ((np.log(mt)/np.log(10)-np.log10(mc))/sm)**2)
-	y = np.empty_like(x)        
-	y[~BMtr] = np.exp(-0.5* ((x[~BMtr]/np.log(10)-np.log10(mc))/sm)**2)           
+	y = np.empty_like(x)
+	y[~BMtr] = np.exp(-0.5* ((x[~BMtr]/np.log(10)-np.log10(mc))/sm)**2)
 	y[BMtr]  =  np.exp(x[BMtr]*(sl+1))/lkm
 	GR_ln10full = GeneralRandom(x,y,1000)
 

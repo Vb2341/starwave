@@ -21,7 +21,7 @@ class SWDist:
 class SWParameters(OrderedDict):
     """
     dict-like class that contains SWParameter objects
-    
+
     Attributes
     ----------
     params_dict : dict
@@ -29,11 +29,11 @@ class SWParameters(OrderedDict):
 
     kwargs: dict
         dictionary of keyword arguments
-            - filename : str 
+            - filename : str
                 if not None, path to file that saves parameters
             - verbose : boolean
                 if True, prints parameters to screen
-    
+
     Methods
     -------
     get_dict():
@@ -42,39 +42,39 @@ class SWParameters(OrderedDict):
         Prints a summary of all contained parameters and their priors
     to_pyabc():
         Converts parameters into pyABC prior distributions
-    
+
     """
-    
+
     def __init__(self, params_dict, kwargs = None):
-        
+
         super().__init__(params_dict)
         self.dict = params_dict
         self.kwargs = kwargs
-        
+
     def __getitem__(self, param):
          return self.dict[param]
-        
+
     def get_values(self):
         values_dict = {};
         for name, param in self.dict.items():
             values_dict[name] = param.value
-            
+
         return values_dict
-    
+
     def summary(self):
         if self.kwargs is not None:
             print_prior_summary(self.dict, filename = self.kwargs.get('filename'),  verbose = self.kwargs.get('verbose'))
 
     def to_torch(self):
         return make_prior(self)
-        
+
     def to_pyabc(self):
         return make_prior_pyabc(self)
 
 class SWParameter(OrderedDict):
     """
     dict-like class for each parameter's prior
-    
+
     Attributes
     ----------
     name : dict
@@ -86,19 +86,19 @@ class SWParameter(OrderedDict):
     distribution : str
         prior distribution name in scipy.stats naming convention
     dist_kwargs : dict
-        arguments to specify non-uniform priors, for example 'mean' and 'sigma' if 
+        arguments to specify non-uniform priors, for example 'mean' and 'sigma' if
         distribution is 'norm'
     fixed : bool
         whether to fix or vary parameter during sampling
-    
+
     Methods
     -------
     set(**attributes):
-        Set any of the parameter's attributes. Any attribute not explicitly 
-        set is left at the default. 
-    
+        Set any of the parameter's attributes. Any attribute not explicitly
+        set is left at the default.
+
     """
-    
+
     def __init__(self, name, value, bounds, distribution = 'uniform', dist_kwargs = None, fixed = False):
         self.name = name
         self.value = value
@@ -106,15 +106,15 @@ class SWParameter(OrderedDict):
         self.distribution = distribution
         self.dist_kwargs = dist_kwargs
         self.fixed = fixed
-        
+
         self.param_dict = dict(name = self.name, value = self.value, bounds = self.bounds,
                           distribution = self.distribution, dist_kwargs = self.dist_kwargs,
                           fixed = self.fixed)
-        
+
         super().__init__(self.param_dict)
-        
+
     def set(self, value = None, bounds = None, distribution = None, dist_kwargs = None, fixed = None):
-        
+
         if value is not None:
             self.value = value
         if bounds is not None:
@@ -125,15 +125,15 @@ class SWParameter(OrderedDict):
             self.dist_kwargs = dist_kwargs
         if fixed is not None:
             self.fixed = fixed
-            
+
         self.param_dict = dict(name = self.name, value = self.value, bounds = self.bounds,
                           distribution = self.distribution, dist_kwargs = self.dist_kwargs,
                           fixed = self.fixed)
-        
+
         super().__init__(self.param_dict)
-        
-def make_params(imf_type, sfh_type, kwargs = None): # add SFH TYPE
-    
+
+def make_params(imf_type, sfh_type, kwargs = None, n_gaussians=None): # add SFH TYPE
+
     parameters = {};
     param_mapper = {};
     parameters['log_int'] = SWParameter('log_int', 2, [2, 6])
@@ -141,24 +141,24 @@ def make_params(imf_type, sfh_type, kwargs = None): # add SFH TYPE
 
     parameters['dm'] = SWParameter('dm', 0, [0, 1], fixed = True)
     parameters['sig_dm'] = SWParameter('sig_dm', 0.1, [0, 0.5], fixed = True)
-    
-    ## ADD EXTINCTION WITH EXTINCT PACKAGE    
+
+    ## ADD EXTINCTION WITH EXTINCT PACKAGE
 
     parameters['av'] = SWParameter('av', 0, [0, 1], fixed = True)
 
     if imf_type == 'spl':
-        
+
         parameters['slope'] = SWParameter('slope', -2.3, [-4, -1])
-        
-    
+
+
     elif imf_type == 'bpl':
-        
+
         parameters['alow'] = SWParameter('alow', -1.3, [-2, 0])
         parameters['ahigh'] = SWParameter('ahigh', -2.3, [-4, -1])
         parameters['bm'] = SWParameter('bm', 0.5, [0.2, 0.8])
 
     elif imf_type == 'ln':
-        
+
         parameters['mean'] = SWParameter('mean', 0.25, [0.1, 0.8])
         parameters['sigma'] = SWParameter('sigma', 0.6, [0.1, 1])
         parameters['bm'] = SWParameter('bm', 1, [0.8, 1.2])
@@ -171,48 +171,59 @@ def make_params(imf_type, sfh_type, kwargs = None): # add SFH TYPE
         parameters['sig_feh'] = SWParameter('sig_feh', 0.1, [0.05, 1])
         parameters['age_feh_corr'] = SWParameter('age_feh_corr', -0.5, [-1, 0])
 
+    elif sfh_type == 'multigaussian':
+        if n_gaussians is None:
+            raise ValueError('Number of SFH gaussians required to initialize parameter sets')
+        for i in range(n_gaussians):
+            parameters[f'age_{i}'] = SWParameter(f'age_{i}', 5, [0.1, 13.4])
+            parameters[f'sig_age_{i}'] = SWParameter(f'sig_age_{i}', 1, [0.1, 5])
+            parameters[f'feh_{i}'] = SWParameter(f'feh_{i}', -1, [-4, 1])
+            parameters[f'sig_feh_{i}'] = SWParameter(f'sig_feh_{i}', 0.1, [0.05, 1])
+            parameters[f'age_feh_corr_{i}'] = SWParameter(f'age_feh_corr_{i}', -0.5, [-1, 0])
+            parameters[f'population_frac_{i}'] = SWParameter(f'population_frac_{i}', 1.0/n_gaussians, [0.0, 1.0])
+
     # for ii,parameter in enumerate(parameters.keys()):
     #     param_mapper[ii] = parameter
     # print(param_mapper)
     return SWParameters(parameters, kwargs = kwargs)#, param_mapper
 
 # def make_prior_pyabc(parameters):
-    
+
 #     priors = OrderedDict{};
-    
+
 #     for name, param in parameters.dict.items():
-        
+
 #         if param.fixed:
 #             priors[name] = pyabc.RV(param.distribution, param.value, 0)
 #             continue
-        
-        
+
+
 #         lower = param.bounds[0]
 #         upper = param.bounds[1]
-        
-#         if param.distribution == 'uniform':    
+
+#         if param.distribution == 'uniform':
 #             priors[name] = pyabc.RV(param.distribution, lower, upper - lower)
-            
+
 #         elif param.distribution == 'norm':
 #             try:
 #                 mean = param.dist_kwargs['mean']
 #                 sigma = param.dist_kwargs['sigma']
 #             except:
 #                 raise ValueError('please pass valid distribution arguments!')
-            
+
 #             priors[name] = pyabc.RV(param.distribution, mean, sigma)
-            
+
 #         else:
 #             raise ValueError('invalid distribution name')
-            
+
 #     pyabc_priors = pyabc.Distribution(**priors)
-    
+
 #     return pyabc_priors
 
 
 
 def print_prior_summary(parameters, filename = None, verbose = True):
-    
+
     if verbose:
         print('verbose')
         for name, param in parameters.items():
@@ -231,16 +242,16 @@ def print_prior_summary(parameters, filename = None, verbose = True):
             print(param.dist_kwargs)
 
 
-    if (filename is not None):  
+    if (filename is not None):
 
         logging.basicConfig(filename = filename,
                     filemode = 'w', format = '%(message)s')
- 
+
         # Creating an object
         logger = logging.getLogger()
-        
+
         # Setting the threshold of logger to DEBUG
-        logger.setLevel(logging.INFO) 
+        logger.setLevel(logging.INFO)
 
         for name, param in parameters.items():
             logger.info('-'*10)
@@ -270,7 +281,7 @@ class MultipleIndependent(Distribution):
         ]
         - [
             Uniform(torch.zeros(1), torch.ones(1)),
-            Uniform(torch.ones(1), 2.0 * torch.ones(1))]    
+            Uniform(torch.ones(1), 2.0 * torch.ones(1))]
     """
 
     def __init__(
@@ -296,7 +307,7 @@ class MultipleIndependent(Distribution):
         """Check if dists is Sequence and longer 1 and check every member."""
         assert isinstance(
             dists, Sequence
-        ), f"""The combination of independent priors must be of type Sequence, is 
+        ), f"""The combination of independent priors must be of type Sequence, is
                {type(dists)}."""
         assert len(dists) > 1, "Provide at least 2 distributions to combine."
         # Check every element of the sequence.
@@ -361,7 +372,7 @@ class MultipleIndependent(Distribution):
     def _prepare_value(self, value) -> Tensor:
         """Return input value with fixed shape.
 
-        Raises: 
+        Raises:
             AssertionError: if value has more than 2 dimensions or invalid size in
                 2nd dimension.
         """
